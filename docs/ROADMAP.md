@@ -43,11 +43,12 @@ The following boundaries are intentional and important when evaluating v0.1:
 - [x] Add the MIT license, security policy, contribution guide, code of conduct,
   changelog, CI workflow, issue forms, and pull request template.
 - [x] Document the v0.1 safety contract and current product boundaries.
-- [ ] Publish the repository under the `main` branch and run the full GitHub
-  Actions matrix on Linux, macOS, and Windows with Python 3.11–3.13.
+- [x] Publish the repository under the `main` branch and run the full GitHub
+  Actions matrix on Linux, macOS, and Windows with Python 3.11–3.13
+  ([verified run](https://github.com/2391572070/DevFreeze/actions/runs/31664838053)).
 - [x] Build both wheel and source-distribution artifacts, then verify a clean
   environment can install them and run `devfreeze doctor`.
-- [ ] Tag `v0.1.0` and publish release notes derived from `CHANGELOG.md`.
+- [x] Tag `v0.1.0` and publish release notes derived from `CHANGELOG.md`.
 - [ ] Enable GitHub private vulnerability reporting and verify the public issue
   chooser sends security reports to `SECURITY.md`.
 - [ ] Add a short, reproducible demo of `freeze` → drift → `thaw` preview →
