@@ -51,13 +51,28 @@ def save_after_gate(data: str, workspace: str, note: str, ready, gate, results) 
 
 class StorageTests(unittest.TestCase):
     def test_home_precedence(self):
+        base = Path(tempfile.gettempdir()).resolve()
+        custom = base / "devfreeze-custom"
+        xdg = base / "devfreeze-xdg"
+        fake_home = base / "devfreeze-user"
         self.assertEqual(
-            get_data_home({"DEVFREEZE_HOME": "/tmp/custom", "XDG_DATA_HOME": "/tmp/xdg"}),
-            Path("/tmp/custom"),
+            get_data_home(
+                {
+                    "DEVFREEZE_HOME": str(custom),
+                    "XDG_DATA_HOME": str(xdg),
+                }
+            ),
+            custom,
         )
-        self.assertEqual(get_data_home({"XDG_DATA_HOME": "/tmp/xdg"}), Path("/tmp/xdg/devfreeze"))
-        with mock.patch("pathlib.Path.home", return_value=Path("/users/test")):
-            self.assertEqual(get_data_home({}), Path("/users/test/.local/share/devfreeze"))
+        self.assertEqual(
+            get_data_home({"XDG_DATA_HOME": str(xdg)}),
+            xdg / "devfreeze",
+        )
+        with mock.patch("pathlib.Path.home", return_value=fake_home):
+            self.assertEqual(
+                get_data_home({}),
+                fake_home / ".local" / "share" / "devfreeze",
+            )
         with self.assertRaisesRegex(StorageError, "absolute"):
             get_data_home({"DEVFREEZE_HOME": "relative"})
 
@@ -80,8 +95,8 @@ class StorageTests(unittest.TestCase):
             store = SnapshotStore(data)
             snapshot = make_snapshot(Path(workspace))
             path = store.save(snapshot)
-            self.assertEqual(path.stat().st_mode & 0o777, 0o600)
             if os.name == "posix":
+                self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o600)
                 self.assertEqual(stat.S_IMODE(Path(data).stat().st_mode), 0o700)
             self.assertFalse(any(item.suffix == ".tmp" for item in Path(data).iterdir()))
             with self.assertRaises(SnapshotExistsError):

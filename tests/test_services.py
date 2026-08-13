@@ -26,15 +26,21 @@ from devfreeze.services import (
 )
 
 
+def native_test_path(name: str) -> str:
+    """Return a stable native absolute path without requiring it to exist."""
+
+    return str(Path(tempfile.gettempdir()).resolve() / name)
+
+
 def make_record(name: str = "web", *, pid: int = 12345) -> ServiceRecord:
     return ServiceRecord(
         name=name,
         argv=["python", "-m", "http.server"],
-        cwd="/tmp/example",
+        cwd=native_test_path("devfreeze-example"),
         pid=pid,
         process_start_time="9876",
         started_at="2026-08-13T00:00:00+00:00",
-        log_path="/tmp/web.log",
+        log_path=native_test_path("devfreeze-web.log"),
         declared_ports=[8000, 8000],
         detected_ports=[8001],
         ready_url="http://127.0.0.1:8000/health",
@@ -71,7 +77,7 @@ class ServiceRecordTests(unittest.TestCase):
             {
                 "name": "worker",
                 "argv": ["python", "worker.py"],
-                "cwd": "/tmp/project",
+                "cwd": native_test_path("devfreeze-project"),
                 "pid": 7,
                 "process_start_time": None,
                 "started_at": "2026-08-13T00:00:00+00:00",
@@ -131,9 +137,9 @@ class ServiceRegistryTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             registry = ServiceRegistry(Path(directory) / "runtime/services.json")
             first = make_record(pid=111)
-            first.workspace_root = "/tmp/project-a"
+            first.workspace_root = native_test_path("devfreeze-project-a")
             second = make_record(pid=222)
-            second.workspace_root = "/tmp/project-b"
+            second.workspace_root = native_test_path("devfreeze-project-b")
             registry.upsert(first)
             registry.upsert(second)
 
@@ -141,7 +147,7 @@ class ServiceRegistryTests(unittest.TestCase):
             self.assertEqual(
                 registry.get(
                     "web",
-                    workspace_root="/tmp/project-b",
+                    workspace_root=native_test_path("devfreeze-project-b"),
                     refresh=False,
                 ).pid,
                 222,
@@ -235,6 +241,7 @@ class ProcessIdentityTests(unittest.TestCase):
             return 1
 
         kernel32.GetProcessTimes = mock.Mock(side_effect=get_process_times)
+        kernel32.WaitForSingleObject = mock.Mock(return_value=0x102)
         kernel32.CloseHandle = mock.Mock(return_value=1)
 
         with mock.patch("devfreeze.services.sys.platform", "win32"), mock.patch(
@@ -251,17 +258,19 @@ class ProcessIdentityTests(unittest.TestCase):
         dotnet_epoch_offset = 504_911_232_000_000_000
         self.assertEqual(actual, f"windows:{filetime_ticks + dotnet_epoch_offset}")
         win_dll.assert_called_once_with("kernel32", use_last_error=True)
-        kernel32.OpenProcess.assert_called_once_with(0x1000, False, 4567)
+        kernel32.OpenProcess.assert_called_once_with(0x101000, False, 4567)
         kernel32.CloseHandle.assert_called_once_with(handle)
         self.assertIs(kernel32.OpenProcess.restype, ctypes.c_void_p)
         self.assertEqual(kernel32.OpenProcess.argtypes[0], ctypes.c_uint32)
         self.assertIs(kernel32.GetProcessTimes.argtypes[0], ctypes.c_void_p)
+        self.assertIs(kernel32.WaitForSingleObject.argtypes[0], ctypes.c_void_p)
         self.assertIs(kernel32.CloseHandle.argtypes[0], ctypes.c_void_p)
 
     def test_windows_start_time_open_process_failure_fails_closed(self):
         kernel32 = mock.Mock()
         kernel32.OpenProcess = mock.Mock(return_value=0)
         kernel32.GetProcessTimes = mock.Mock(return_value=1)
+        kernel32.WaitForSingleObject = mock.Mock(return_value=0x102)
         kernel32.CloseHandle = mock.Mock(return_value=1)
 
         with mock.patch("devfreeze.services.sys.platform", "win32"), mock.patch(
@@ -282,6 +291,7 @@ class ProcessIdentityTests(unittest.TestCase):
         handle = 0x1_0000_5678
         kernel32.OpenProcess = mock.Mock(return_value=handle)
         kernel32.GetProcessTimes = mock.Mock(return_value=0)
+        kernel32.WaitForSingleObject = mock.Mock(return_value=0x102)
         kernel32.CloseHandle = mock.Mock(return_value=1)
 
         with mock.patch("devfreeze.services.sys.platform", "win32"), mock.patch(
@@ -295,23 +305,49 @@ class ProcessIdentityTests(unittest.TestCase):
             self.assertIsNone(process_start_time(4567))
 
         kernel32.GetProcessTimes.assert_called_once()
+        kernel32.WaitForSingleObject.assert_not_called()
         kernel32.CloseHandle.assert_called_once_with(handle)
+
+    def test_windows_queryable_exited_process_is_not_alive(self):
+        kernel32 = mock.Mock()
+        handle = 0x1_0000_9ABC
+        kernel32.OpenProcess = mock.Mock(return_value=handle)
+        kernel32.GetProcessTimes = mock.Mock(return_value=1)
+        kernel32.WaitForSingleObject = mock.Mock(return_value=0)
+        kernel32.CloseHandle = mock.Mock(return_value=1)
+
+        with mock.patch("devfreeze.services.sys.platform", "win32"), mock.patch(
+            "devfreeze.services.os.name",
+            "nt",
+        ), mock.patch(
+            "devfreeze.services.ctypes.WinDLL",
+            return_value=kernel32,
+            create=True,
+        ), mock.patch(
+            "devfreeze.services.os.kill",
+            side_effect=AssertionError("Windows liveness must not call os.kill"),
+        ) as kill:
+            self.assertFalse(is_process_alive(4567))
+
+        kernel32.WaitForSingleObject.assert_called_once_with(handle, 0)
+        kernel32.CloseHandle.assert_called_once_with(handle)
+        kill.assert_not_called()
 
     def test_windows_is_pid_alive_never_calls_os_kill(self):
         with mock.patch("devfreeze.services.sys.platform", "win32"), mock.patch(
             "devfreeze.services.os.name",
             "nt",
         ), mock.patch(
-            "devfreeze.services.process_start_time",
-            side_effect=["windows:123", None],
-        ) as start_time, mock.patch(
+            "devfreeze.services._windows_process_state",
+            side_effect=[("windows:123", True), ("windows:123", False)],
+        ) as process_state, mock.patch(
             "devfreeze.services.os.kill",
             side_effect=AssertionError("Windows liveness must not call os.kill"),
         ) as kill:
             self.assertTrue(is_process_alive(4567))
             self.assertFalse(is_process_alive(4567))
 
-        self.assertEqual(start_time.call_count, 2)
+        self.assertEqual(process_state.call_count, 2)
         kill.assert_not_called()
 
     def test_windows_identity_match_is_exact(self):
@@ -319,8 +355,8 @@ class ProcessIdentityTests(unittest.TestCase):
             "devfreeze.services.os.name",
             "nt",
         ), mock.patch(
-            "devfreeze.services.process_start_time",
-            return_value="windows:123",
+            "devfreeze.services._windows_process_state",
+            return_value=("windows:123", True),
         ):
             self.assertTrue(process_identity_matches(4567, "windows:123"))
             self.assertFalse(process_identity_matches(4567, "windows:124"))
@@ -334,7 +370,7 @@ class ProcessIdentityTests(unittest.TestCase):
         ), mock.patch(
             "devfreeze.services.process_identity_matches",
             return_value=False,
-        ), mock.patch("devfreeze.services.os.killpg") as killpg:
+        ), mock.patch("devfreeze.services.os.killpg", create=True) as killpg:
             from devfreeze.services import UnsafeProcessError
 
             registry = mock.Mock()
@@ -362,6 +398,7 @@ class ProcessIdentityTests(unittest.TestCase):
         ), mock.patch(
             "devfreeze.services.os.killpg",
             side_effect=kill_group,
+            create=True,
         ) as killpg:
             self.assertTrue(ServiceRegistry.stop(registry, "verified", timeout=0.1))
 
@@ -374,6 +411,33 @@ class ProcessIdentityTests(unittest.TestCase):
             workspace_root=record.workspace_root,
             expected_pid=record.pid,
         )
+
+    def test_non_linux_force_refuses_if_leader_identity_changes(self):
+        record = make_record("reused", pid=43210)
+        registry = mock.Mock()
+        registry.get.return_value = record
+
+        with mock.patch("devfreeze.services.sys.platform", "darwin"), mock.patch(
+            "devfreeze.services.os.name",
+            "posix",
+        ), mock.patch(
+            "devfreeze.services.process_identity_matches",
+            side_effect=[True, True, False],
+        ), mock.patch("devfreeze.services.os.killpg", create=True) as killpg:
+            from devfreeze.services import UnsafeProcessError
+
+            with self.assertRaises(UnsafeProcessError):
+                ServiceRegistry.stop(
+                    registry,
+                    "reused",
+                    timeout=0,
+                    force=True,
+                )
+
+        sent_signals = [call.args[1] for call in killpg.call_args_list]
+        self.assertEqual(sent_signals, [signal.SIGTERM, 0, 0])
+        self.assertFalse(any(item not in {signal.SIGTERM, 0} for item in sent_signals))
+        registry.remove.assert_not_called()
 
 
 class ManagedProcessTests(unittest.TestCase):

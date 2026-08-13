@@ -56,8 +56,9 @@ class RecoveryTests(unittest.TestCase):
             self.assertIsNotNone(snapshot.git)
 
     def test_plan_does_not_treat_other_workspace_service_as_running(self):
-        with tempfile.TemporaryDirectory() as directory:
+        with tempfile.TemporaryDirectory() as directory, tempfile.TemporaryDirectory() as other:
             root = Path(directory)
+            other_root = Path(other).resolve()
             service = ServiceState(
                 name="web",
                 command=("python", "server.py"),
@@ -69,11 +70,11 @@ class RecoveryTests(unittest.TestCase):
             record = ServiceRecord(
                 name="web",
                 argv=["python", "server.py"],
-                cwd="/tmp/another-project",
+                cwd=str(other_root),
                 pid=12345,
                 process_start_time="linux:1",
                 started_at="2026-08-13T00:00:00+00:00",
-                workspace_root="/tmp/another-project",
+                workspace_root=str(other_root),
             )
             snapshot = make_snapshot(root, services=(service,))
             with mock.patch("devfreeze.recovery.capture_tooling", return_value=(ToolInfo("git", "git version test"),)):
@@ -177,12 +178,13 @@ class RecoveryTests(unittest.TestCase):
                     execute_recovery_plan(plan, registry=FakeRegistry())
 
     def test_execute_rejects_service_outside_workspace(self):
-        with tempfile.TemporaryDirectory() as directory:
+        with tempfile.TemporaryDirectory() as directory, tempfile.TemporaryDirectory() as outside:
             root = Path(directory)
+            outside_root = Path(outside).resolve()
             service = ServiceState(
                 name="web",
                 command=("python", "-m", "http.server"),
-                cwd="/tmp/outside-devfreeze-workspace",
+                cwd=str(outside_root),
                 ports=(8000,),
                 ready_url=None,
                 status="configured",

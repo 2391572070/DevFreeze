@@ -34,6 +34,9 @@ from .models import validate_name
 
 REGISTRY_VERSION = 1
 _PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+_SYNCHRONIZE = 0x00100000
+_WAIT_OBJECT_0 = 0x00000000
+_WAIT_TIMEOUT = 0x00000102
 _WINDOWS_DATETIME_TICKS_AT_FILETIME_EPOCH = 504_911_232_000_000_000
 
 
@@ -500,6 +503,19 @@ class ServiceRegistry:
                 "use force=True to send SIGKILL"
             )
         if _termination_target_alive(record):
+            if (
+                record.detached
+                and os.name == "posix"
+                and not sys.platform.startswith("linux")
+                and not process_identity_matches(
+                    record.pid,
+                    record.process_start_time,
+                )
+            ):
+                raise UnsafeProcessError(
+                    f"cannot prove the identity of service {name!r} before "
+                    "forced termination; the record was retained"
+                )
             kill_signal = getattr(signal, "SIGKILL", signal.SIGTERM)
             _signal_managed_process(record, kill_signal, trusted_group=True)
             kill_deadline = time.monotonic() + 1.0
@@ -711,6 +727,13 @@ def process_start_time(pid: int) -> str | None:
 def _windows_process_start_time(pid: int) -> str | None:
     """Read a Windows creation time without invoking a shell or PowerShell."""
 
+    state = _windows_process_state(pid)
+    return None if state is None else state[0]
+
+
+def _windows_process_state(pid: int) -> tuple[str, bool] | None:
+    """Return a Windows creation identity and whether the process is active."""
+
     try:
         kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
     except (AttributeError, OSError):
@@ -718,6 +741,7 @@ def _windows_process_start_time(pid: int) -> str | None:
 
     open_process = kernel32.OpenProcess
     get_process_times = kernel32.GetProcessTimes
+    wait_for_single_object = kernel32.WaitForSingleObject
     close_handle = kernel32.CloseHandle
 
     # Explicit signatures are essential on 64-bit Windows: ctypes otherwise
@@ -733,12 +757,18 @@ def _windows_process_start_time(pid: int) -> str | None:
         filetime_pointer,
     ]
     get_process_times.restype = ctypes.c_int32
+    wait_for_single_object.argtypes = [ctypes.c_void_p, ctypes.c_uint32]
+    wait_for_single_object.restype = ctypes.c_uint32
     close_handle.argtypes = [ctypes.c_void_p]
     close_handle.restype = ctypes.c_int32
 
     try:
-        handle = open_process(_PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
-    except (OSError, TypeError, ValueError):
+        handle = open_process(
+            _PROCESS_QUERY_LIMITED_INFORMATION | _SYNCHRONIZE,
+            False,
+            pid,
+        )
+    except (OSError, OverflowError, TypeError, ValueError):
         return None
     if not handle:
         # Access denied and an already-exited process are both fail-closed.
@@ -757,16 +787,27 @@ def _windows_process_start_time(pid: int) -> str | None:
                 ctypes.byref(kernel_time),
                 ctypes.byref(user_time),
             )
-        except (OSError, TypeError, ValueError):
+        except (OSError, OverflowError, TypeError, ValueError):
             return None
         if not succeeded:
+            return None
+        try:
+            wait_result = wait_for_single_object(handle, 0)
+        except (OSError, OverflowError, TypeError, ValueError):
+            return None
+        if wait_result == _WAIT_TIMEOUT:
+            is_alive = True
+        elif wait_result == _WAIT_OBJECT_0:
+            is_alive = False
+        else:
+            # WAIT_FAILED and unexpected results cannot prove process state.
             return None
         filetime_ticks = (
             creation_time.dwHighDateTime << 32
         ) | creation_time.dwLowDateTime
         # Preserve the former PowerShell DateTime.Ticks registry representation.
         datetime_ticks = filetime_ticks + _WINDOWS_DATETIME_TICKS_AT_FILETIME_EPOCH
-        return f"windows:{datetime_ticks}"
+        return f"windows:{datetime_ticks}", is_alive
     finally:
         try:
             close_handle(handle)
@@ -784,8 +825,9 @@ def is_pid_alive(pid: int) -> bool:
         return stat is not None and stat[0] != "Z"
     if os.name == "nt":
         # Windows has no safe ``os.kill(pid, 0)`` probe: Python maps signals to
-        # TerminateProcess there.  Identity-query failures therefore fail closed.
-        return process_start_time(pid) is not None
+        # TerminateProcess there.  State-query failures therefore fail closed.
+        state = _windows_process_state(pid)
+        return state is not None and state[1]
     try:
         os.kill(pid, 0)
     except ProcessLookupError:
@@ -800,7 +842,12 @@ def is_pid_alive(pid: int) -> bool:
 def process_identity_matches(pid: int, expected_start_time: str | None) -> bool:
     """Check activity and guard against PID reuse with a creation identity."""
 
-    if not is_pid_alive(pid) or expected_start_time is None:
+    if expected_start_time is None:
+        return False
+    if os.name == "nt":
+        state = _windows_process_state(pid)
+        return state is not None and state[1] and state[0] == str(expected_start_time)
+    if not is_pid_alive(pid):
         return False
     return process_start_time(pid) == str(expected_start_time)
 
