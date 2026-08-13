@@ -8,6 +8,7 @@ involved.
 from __future__ import annotations
 
 from contextlib import contextmanager
+import ctypes
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 import errno
@@ -32,6 +33,17 @@ from .models import validate_name
 
 
 REGISTRY_VERSION = 1
+_PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+_WINDOWS_DATETIME_TICKS_AT_FILETIME_EPOCH = 504_911_232_000_000_000
+
+
+class _WindowsFileTime(ctypes.Structure):
+    """Windows ``FILETIME`` with a platform-independent 32-bit layout."""
+
+    _fields_ = [
+        ("dwLowDateTime", ctypes.c_uint32),
+        ("dwHighDateTime", ctypes.c_uint32),
+    ]
 
 
 class ServiceError(RuntimeError):
@@ -691,37 +703,75 @@ def process_start_time(pid: int) -> str | None:
             return None
         value = completed.stdout.strip()
         return f"ps:{value}" if completed.returncode == 0 and value else None
-    if os.name == "nt":  # pragma: no cover - exercised on Windows
-        executable = trusted_which("powershell.exe") or trusted_which("powershell")
-        if executable is None:
-            return None
-        expression = (
-            f"(Get-Process -Id {pid} -ErrorAction Stop)."
-            "StartTime.ToUniversalTime().Ticks"
-        )
-        try:
-            completed = subprocess.run(
-                [
-                    executable,
-                    "-NoLogo",
-                    "-NoProfile",
-                    "-NonInteractive",
-                    "-Command",
-                    expression,
-                ],
-                check=False,
-                stdin=subprocess.DEVNULL,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.DEVNULL,
-                text=True,
-                timeout=3.0,
-                shell=False,
-            )
-        except (OSError, subprocess.SubprocessError):
-            return None
-        value = completed.stdout.strip()
-        return f"windows:{value}" if completed.returncode == 0 and value.isdigit() else None
+    if os.name == "nt":  # pragma: no cover - simulated on non-Windows in tests
+        return _windows_process_start_time(pid)
     return None
+
+
+def _windows_process_start_time(pid: int) -> str | None:
+    """Read a Windows creation time without invoking a shell or PowerShell."""
+
+    try:
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    except (AttributeError, OSError):
+        return None
+
+    open_process = kernel32.OpenProcess
+    get_process_times = kernel32.GetProcessTimes
+    close_handle = kernel32.CloseHandle
+
+    # Explicit signatures are essential on 64-bit Windows: ctypes otherwise
+    # assumes a C ``int`` return and may truncate the process HANDLE.
+    open_process.argtypes = [ctypes.c_uint32, ctypes.c_int32, ctypes.c_uint32]
+    open_process.restype = ctypes.c_void_p
+    filetime_pointer = ctypes.POINTER(_WindowsFileTime)
+    get_process_times.argtypes = [
+        ctypes.c_void_p,
+        filetime_pointer,
+        filetime_pointer,
+        filetime_pointer,
+        filetime_pointer,
+    ]
+    get_process_times.restype = ctypes.c_int32
+    close_handle.argtypes = [ctypes.c_void_p]
+    close_handle.restype = ctypes.c_int32
+
+    try:
+        handle = open_process(_PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+    except (OSError, TypeError, ValueError):
+        return None
+    if not handle:
+        # Access denied and an already-exited process are both fail-closed.
+        return None
+
+    try:
+        creation_time = _WindowsFileTime()
+        exit_time = _WindowsFileTime()
+        kernel_time = _WindowsFileTime()
+        user_time = _WindowsFileTime()
+        try:
+            succeeded = get_process_times(
+                handle,
+                ctypes.byref(creation_time),
+                ctypes.byref(exit_time),
+                ctypes.byref(kernel_time),
+                ctypes.byref(user_time),
+            )
+        except (OSError, TypeError, ValueError):
+            return None
+        if not succeeded:
+            return None
+        filetime_ticks = (
+            creation_time.dwHighDateTime << 32
+        ) | creation_time.dwLowDateTime
+        # Preserve the former PowerShell DateTime.Ticks registry representation.
+        datetime_ticks = filetime_ticks + _WINDOWS_DATETIME_TICKS_AT_FILETIME_EPOCH
+        return f"windows:{datetime_ticks}"
+    finally:
+        try:
+            close_handle(handle)
+        except (OSError, TypeError, ValueError):
+            pass
 
 
 def is_pid_alive(pid: int) -> bool:
@@ -732,6 +782,10 @@ def is_pid_alive(pid: int) -> bool:
     if sys.platform.startswith("linux"):
         stat = _read_linux_proc_stat(pid)
         return stat is not None and stat[0] != "Z"
+    if os.name == "nt":
+        # Windows has no safe ``os.kill(pid, 0)`` probe: Python maps signals to
+        # TerminateProcess there.  Identity-query failures therefore fail closed.
+        return process_start_time(pid) is not None
     try:
         os.kill(pid, 0)
     except ProcessLookupError:
@@ -1056,11 +1110,36 @@ def _record_or_group_alive(record: ServiceRecord) -> bool:
 
 
 def _termination_target_alive(record: ServiceRecord) -> bool:
-    """Track the whole group after its leader identity was verified once."""
+    """Track the whole group after its leader identity was verified this call.
+
+    On non-Linux POSIX systems, registry refreshes deliberately retain an
+    orphaned group when its identity can no longer be proved.  A stop operation
+    is different: it verifies the current leader immediately before signalling,
+    so the group created by that leader can be safely probed until termination.
+    """
 
     if record.detached and os.name == "posix":
-        return _managed_group_alive(record)
+        if sys.platform.startswith("linux"):
+            return _linux_process_group_alive(record.pid)
+        return _trusted_posix_process_group_alive(record.pid)
     return process_identity_matches(record.pid, record.process_start_time)
+
+
+def _trusted_posix_process_group_alive(group_id: int) -> bool:
+    """Probe a POSIX group already trusted by the current stop operation."""
+
+    try:
+        os.killpg(group_id, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except OSError as exc:
+        if exc.errno == errno.ESRCH:
+            return False
+        # Unknown probe failures must not be mistaken for successful shutdown.
+        return True
+    return True
 
 
 def _linux_process_group_alive(group_id: int) -> bool:

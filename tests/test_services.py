@@ -1,11 +1,11 @@
 from __future__ import annotations
 
+import ctypes
 import json
 import os
 from pathlib import Path
 import signal
 import socket
-import subprocess
 import sys
 import tempfile
 import stat
@@ -160,6 +160,9 @@ class ServiceRegistryTests(unittest.TestCase):
             with mock.patch(
                 "devfreeze.services.process_identity_matches",
                 side_effect=lambda pid, _start: pid == 222,
+            ), mock.patch(
+                "devfreeze.services._managed_group_alive",
+                return_value=False,
             ):
                 removed = registry.cleanup_stale()
 
@@ -220,6 +223,109 @@ class ProcessIdentityTests(unittest.TestCase):
             self.assertIsNotNone(start_time)
             self.assertFalse(is_process_alive(os.getpid(), f"{start_time}-different"))
 
+    def test_windows_start_time_uses_filetime_ticks_and_closes_handle(self):
+        kernel32 = mock.Mock()
+        handle = 0x1_0000_1234
+        kernel32.OpenProcess = mock.Mock(return_value=handle)
+
+        def get_process_times(actual_handle, creation, _exit, _kernel, _user):
+            self.assertEqual(actual_handle, handle)
+            creation._obj.dwLowDateTime = 0x89ABCDEF
+            creation._obj.dwHighDateTime = 0x01234567
+            return 1
+
+        kernel32.GetProcessTimes = mock.Mock(side_effect=get_process_times)
+        kernel32.CloseHandle = mock.Mock(return_value=1)
+
+        with mock.patch("devfreeze.services.sys.platform", "win32"), mock.patch(
+            "devfreeze.services.os.name",
+            "nt",
+        ), mock.patch(
+            "devfreeze.services.ctypes.WinDLL",
+            return_value=kernel32,
+            create=True,
+        ) as win_dll:
+            actual = process_start_time(4567)
+
+        filetime_ticks = (0x01234567 << 32) | 0x89ABCDEF
+        dotnet_epoch_offset = 504_911_232_000_000_000
+        self.assertEqual(actual, f"windows:{filetime_ticks + dotnet_epoch_offset}")
+        win_dll.assert_called_once_with("kernel32", use_last_error=True)
+        kernel32.OpenProcess.assert_called_once_with(0x1000, False, 4567)
+        kernel32.CloseHandle.assert_called_once_with(handle)
+        self.assertIs(kernel32.OpenProcess.restype, ctypes.c_void_p)
+        self.assertEqual(kernel32.OpenProcess.argtypes[0], ctypes.c_uint32)
+        self.assertIs(kernel32.GetProcessTimes.argtypes[0], ctypes.c_void_p)
+        self.assertIs(kernel32.CloseHandle.argtypes[0], ctypes.c_void_p)
+
+    def test_windows_start_time_open_process_failure_fails_closed(self):
+        kernel32 = mock.Mock()
+        kernel32.OpenProcess = mock.Mock(return_value=0)
+        kernel32.GetProcessTimes = mock.Mock(return_value=1)
+        kernel32.CloseHandle = mock.Mock(return_value=1)
+
+        with mock.patch("devfreeze.services.sys.platform", "win32"), mock.patch(
+            "devfreeze.services.os.name",
+            "nt",
+        ), mock.patch(
+            "devfreeze.services.ctypes.WinDLL",
+            return_value=kernel32,
+            create=True,
+        ):
+            self.assertIsNone(process_start_time(4567))
+
+        kernel32.GetProcessTimes.assert_not_called()
+        kernel32.CloseHandle.assert_not_called()
+
+    def test_windows_start_time_query_failure_closes_handle(self):
+        kernel32 = mock.Mock()
+        handle = 0x1_0000_5678
+        kernel32.OpenProcess = mock.Mock(return_value=handle)
+        kernel32.GetProcessTimes = mock.Mock(return_value=0)
+        kernel32.CloseHandle = mock.Mock(return_value=1)
+
+        with mock.patch("devfreeze.services.sys.platform", "win32"), mock.patch(
+            "devfreeze.services.os.name",
+            "nt",
+        ), mock.patch(
+            "devfreeze.services.ctypes.WinDLL",
+            return_value=kernel32,
+            create=True,
+        ):
+            self.assertIsNone(process_start_time(4567))
+
+        kernel32.GetProcessTimes.assert_called_once()
+        kernel32.CloseHandle.assert_called_once_with(handle)
+
+    def test_windows_is_pid_alive_never_calls_os_kill(self):
+        with mock.patch("devfreeze.services.sys.platform", "win32"), mock.patch(
+            "devfreeze.services.os.name",
+            "nt",
+        ), mock.patch(
+            "devfreeze.services.process_start_time",
+            side_effect=["windows:123", None],
+        ) as start_time, mock.patch(
+            "devfreeze.services.os.kill",
+            side_effect=AssertionError("Windows liveness must not call os.kill"),
+        ) as kill:
+            self.assertTrue(is_process_alive(4567))
+            self.assertFalse(is_process_alive(4567))
+
+        self.assertEqual(start_time.call_count, 2)
+        kill.assert_not_called()
+
+    def test_windows_identity_match_is_exact(self):
+        with mock.patch("devfreeze.services.sys.platform", "win32"), mock.patch(
+            "devfreeze.services.os.name",
+            "nt",
+        ), mock.patch(
+            "devfreeze.services.process_start_time",
+            return_value="windows:123",
+        ):
+            self.assertTrue(process_identity_matches(4567, "windows:123"))
+            self.assertFalse(process_identity_matches(4567, "windows:124"))
+            self.assertFalse(process_identity_matches(4567, None))
+
     def test_non_linux_orphan_group_is_retained_but_never_signalled(self):
         record = make_record("orphan")
         with mock.patch("devfreeze.services.sys.platform", "darwin"), mock.patch(
@@ -236,6 +342,38 @@ class ProcessIdentityTests(unittest.TestCase):
             with self.assertRaises(UnsafeProcessError):
                 ServiceRegistry.stop(registry, "orphan")
         killpg.assert_not_called()
+
+    def test_non_linux_verified_detached_stop_probes_group_until_gone(self):
+        record = make_record("verified", pid=43210)
+        registry = mock.Mock()
+        registry.get.return_value = record
+
+        def kill_group(pid, sent_signal):
+            self.assertEqual(pid, record.pid)
+            if sent_signal == 0:
+                raise ProcessLookupError
+
+        with mock.patch("devfreeze.services.sys.platform", "darwin"), mock.patch(
+            "devfreeze.services.os.name",
+            "posix",
+        ), mock.patch(
+            "devfreeze.services.process_identity_matches",
+            return_value=True,
+        ), mock.patch(
+            "devfreeze.services.os.killpg",
+            side_effect=kill_group,
+        ) as killpg:
+            self.assertTrue(ServiceRegistry.stop(registry, "verified", timeout=0.1))
+
+        self.assertEqual(
+            [call.args[1] for call in killpg.call_args_list],
+            [signal.SIGTERM, 0],
+        )
+        registry.remove.assert_called_once_with(
+            "verified",
+            workspace_root=record.workspace_root,
+            expected_pid=record.pid,
+        )
 
 
 class ManagedProcessTests(unittest.TestCase):

@@ -130,10 +130,12 @@ class RecoveryTests(unittest.TestCase):
                     execute_recovery_plan(plan, registry=FakeRegistry())
 
     def test_missing_workspace_is_blocker(self):
-        snapshot = make_snapshot(Path("/definitely/missing/devfreeze-test"))
-        plan = build_recovery_plan(snapshot, FakeRegistry())
-        self.assertEqual(len(plan.blockers), 1)
-        self.assertEqual(plan.blockers[0].field, "workspace.root")
+        with tempfile.TemporaryDirectory() as directory:
+            missing = Path(directory).resolve() / "missing-workspace"
+            snapshot = make_snapshot(missing)
+            plan = build_recovery_plan(snapshot, FakeRegistry())
+            self.assertEqual(len(plan.blockers), 1)
+            self.assertEqual(plan.blockers[0].field, "workspace.root")
 
     def test_git_drift_is_warning_and_never_mutates_git(self):
         with tempfile.TemporaryDirectory() as directory:

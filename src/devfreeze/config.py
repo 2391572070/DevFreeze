@@ -16,6 +16,12 @@ from .models import validate_name
 CONFIG_FILENAME = ".devfreeze.toml"
 
 
+def _canonical_path(value: str | os.PathLike[str]) -> Path:
+    """Return the canonical absolute path used for all project-root checks."""
+
+    return Path(value).expanduser().resolve()
+
+
 @dataclass(frozen=True, slots=True)
 class ServiceConfig:
     name: str
@@ -42,9 +48,10 @@ def _contained_service_cwd(root: Path, value: object, context: str) -> str:
     if not isinstance(value, str) or not value or "\x00" in value:
         raise ConfigError(f"{context}.cwd must be a non-empty string")
     path = Path(value).expanduser()
-    resolved = path.resolve() if path.is_absolute() else (root / path).resolve()
+    canonical_root = _canonical_path(root)
+    resolved = _canonical_path(path if path.is_absolute() else canonical_root / path)
     try:
-        relative = resolved.relative_to(root.resolve())
+        relative = resolved.relative_to(canonical_root)
     except ValueError as exc:
         raise ConfigError(f"{context}.cwd must stay inside the project root") from exc
     return os.fspath(relative) if os.fspath(relative) else "."
@@ -110,9 +117,9 @@ def validate_ready_url(value: object, *, context: str = "ready_url") -> str:
 
 
 def find_project_root(start: str | os.PathLike[str]) -> Path:
-    """Find the nearest config or Git root, falling back to the start directory."""
+    """Find the nearest config or Git root and return its canonical path."""
 
-    candidate = Path(start).expanduser().resolve()
+    candidate = _canonical_path(start)
     if candidate.is_file():
         candidate = candidate.parent
     for directory in (candidate, *candidate.parents):
@@ -126,7 +133,7 @@ def find_project_root(start: str | os.PathLike[str]) -> Path:
 def load_config(root: str | os.PathLike[str]) -> ProjectConfig:
     """Load and strictly validate a project configuration if present."""
 
-    project_root = Path(root).expanduser().resolve()
+    project_root = _canonical_path(root)
     path = project_root / CONFIG_FILENAME
     if not path.exists():
         return ProjectConfig()
@@ -156,10 +163,10 @@ def load_config(root: str | os.PathLike[str]) -> ProjectConfig:
         if not isinstance(workspace_file, str) or not workspace_file or "\x00" in workspace_file:
             raise ConfigError("workspace_file must be a non-empty string")
         workspace_path = Path(workspace_file)
-        resolved = (
-            (project_root / workspace_path).resolve()
+        resolved = _canonical_path(
+            project_root / workspace_path
             if not workspace_path.is_absolute()
-            else workspace_path.resolve()
+            else workspace_path
         )
         try:
             resolved.relative_to(project_root)

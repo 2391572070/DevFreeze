@@ -21,6 +21,7 @@ class ConfigTests(unittest.TestCase):
     def test_loads_strict_service_array_and_finds_parent_root(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
+            canonical_root = root.resolve()
             nested = root / "src" / "package"
             nested.mkdir(parents=True)
             self.write(
@@ -42,11 +43,27 @@ command = ["python", "worker.py"]
 """,
             )
             config = load_config(root)
-            self.assertEqual(find_project_root(nested), root)
+            self.assertEqual(find_project_root(nested), canonical_root)
         self.assertEqual(config.workspace_file, "dev.code-workspace")
         self.assertEqual([service.name for service in config.services], ["web", "worker"])
         self.assertEqual(config.services[0].command, ("python", "-m", "http.server", "8000"))
         self.assertEqual(config.services[0].ports, (8000,))
+
+    def test_project_root_is_canonical_across_directory_aliases(self):
+        with tempfile.TemporaryDirectory() as directory:
+            container = Path(directory)
+            root = container / "project"
+            nested = root / "src"
+            nested.mkdir(parents=True)
+            self.write(root, "version = 1\n")
+            alias = container / "project-alias"
+            try:
+                alias.symlink_to(root, target_is_directory=True)
+            except (OSError, NotImplementedError):
+                self.skipTest("directory symbolic links are unavailable")
+
+            self.assertEqual(find_project_root(alias / "src"), root.resolve())
+            self.assertEqual(load_config(alias).version, 1)
 
     def test_command_must_be_nonempty_string_array(self):
         invalid_values = ('"npm run dev"', "[]", '["npm", 1]')
