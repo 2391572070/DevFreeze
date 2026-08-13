@@ -214,6 +214,8 @@ class ServiceRegistryTests(unittest.TestCase):
 class ProcessIdentityTests(unittest.TestCase):
     def test_linux_identity_requires_matching_start_time(self):
         with mock.patch("devfreeze.services.sys.platform", "linux"), mock.patch(
+            "devfreeze.services.os.name", "posix"
+        ), mock.patch(
             "devfreeze.services.is_pid_alive", return_value=True
         ), mock.patch(
             "devfreeze.services.process_start_time", return_value="42"
