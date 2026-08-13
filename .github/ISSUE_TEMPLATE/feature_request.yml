@@ -1,0 +1,71 @@
+name: Feature request
+description: Propose a focused improvement to DevFreeze
+title: "[Feature]: "
+labels:
+  - enhancement
+  - needs-triage
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Please review the [roadmap](https://github.com/2391572070/DevFreeze/blob/main/docs/ROADMAP.md) and keep proposals focused enough to review independently.
+
+        **Do not disclose a suspected security vulnerability in this form.** Follow [SECURITY.md](https://github.com/2391572070/DevFreeze/security/policy) instead.
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What developer workflow is difficult today, and who experiences it?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed behavior
+      description: Describe observable CLI or format behavior, not only an implementation.
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: Include existing commands or external tools that partly solve the problem.
+    validations:
+      required: true
+  - type: dropdown
+    id: roadmap
+    attributes:
+      label: Roadmap fit
+      options:
+        - v0.2 reliable recovery and usability
+        - v0.3 portable collaboration and integrations
+        - future or not yet listed
+    validations:
+      required: true
+  - type: textarea
+    id: safety
+    attributes:
+      label: Safety, privacy, and compatibility impact
+      description: Address command execution, secrets, paths, process signaling, Git/source mutation, network access, and persisted-format compatibility as applicable.
+    validations:
+      required: true
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Suggested acceptance criteria
+      placeholder: |
+        - [ ] ...
+        - [ ] ...
+    validations:
+      required: true
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Submission checks
+      options:
+        - label: I searched existing issues, pull requests, and the roadmap for related work.
+          required: true
+        - label: I understand that behavior or persisted-format changes need design discussion before implementation.
+          required: true
+        - label: This form does not disclose a suspected security vulnerability.
+          required: true

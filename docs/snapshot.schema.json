@@ -1,0 +1,271 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://devfreeze.dev/schema/snapshot-v1.json",
+  "title": "DevFreeze snapshot",
+  "description": "The persisted, metadata-only DevFreeze snapshot format, version 1.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "name",
+    "created_at",
+    "workspace",
+    "git",
+    "platform",
+    "tooling",
+    "services",
+    "note"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": 1
+    },
+    "name": {
+      "$ref": "#/$defs/portableName"
+    },
+    "created_at": {
+      "type": "string",
+      "format": "date-time",
+      "maxLength": 128
+    },
+    "workspace": {
+      "$ref": "#/$defs/workspace"
+    },
+    "git": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/git"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "platform": {
+      "$ref": "#/$defs/platform"
+    },
+    "tooling": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/tool"
+      }
+    },
+    "services": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/service"
+      }
+    },
+    "note": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "minLength": 1,
+      "maxLength": 100000
+    }
+  },
+  "$defs": {
+    "portableName": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$",
+      "description": "Runtime validation also rejects Windows reserved device names."
+    },
+    "nonEmptyString": {
+      "type": "string",
+      "minLength": 1
+    },
+    "absolutePath": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        {
+          "maxLength": 32768
+        }
+      ],
+      "description": "A POSIX or Windows absolute path with no parent traversal; runtime validation enforces containment."
+    },
+    "workspace": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "root",
+        "cwd",
+        "workspace_file"
+      ],
+      "properties": {
+        "root": {
+          "$ref": "#/$defs/absolutePath"
+        },
+        "cwd": {
+          "$ref": "#/$defs/absolutePath"
+        },
+        "workspace_file": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/absolutePath"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      }
+    },
+    "git": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "remote",
+        "branch",
+        "head",
+        "dirty",
+        "changed_files"
+      ],
+      "properties": {
+        "remote": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "minLength": 1,
+          "maxLength": 32768
+        },
+        "branch": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "minLength": 1,
+          "maxLength": 1024
+        },
+        "head": {
+          "type": "string",
+          "pattern": "^(?:[0-9a-fA-F]{4,128}|unborn)$"
+        },
+        "dirty": {
+          "type": "boolean"
+        },
+        "changed_files": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 32768,
+            "description": "A repository-relative file path with no parent traversal."
+          }
+        }
+      }
+    },
+    "platform": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "system",
+        "release",
+        "machine",
+        "python"
+      ],
+      "properties": {
+        "system": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 1024
+        },
+        "release": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 1024
+        },
+        "machine": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 1024
+        },
+        "python": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 1024
+        }
+      }
+    },
+    "tool": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "version"
+      ],
+      "properties": {
+        "name": {
+          "$ref": "#/$defs/portableName"
+        },
+        "version": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "minLength": 1,
+          "maxLength": 4096
+        }
+      }
+    },
+    "service": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "command",
+        "cwd",
+        "ports",
+        "ready_url",
+        "status"
+      ],
+      "properties": {
+        "name": {
+          "$ref": "#/$defs/portableName"
+        },
+        "command": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 32768
+          }
+        },
+        "cwd": {
+          "$ref": "#/$defs/absolutePath"
+        },
+        "ports": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 65535
+          }
+        },
+        "ready_url": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "minLength": 1,
+          "maxLength": 8192
+        },
+        "status": {
+          "enum": [
+            "configured",
+            "running",
+            "stopped",
+            "exited",
+            "unknown"
+          ]
+        }
+      }
+    }
+  }
+}

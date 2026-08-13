@@ -1,0 +1,83 @@
+name: Bug report
+description: Report reproducible incorrect DevFreeze behavior
+title: "[Bug]: "
+labels:
+  - bug
+  - needs-triage
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for helping improve DevFreeze.
+
+        **Do not submit suspected security vulnerabilities here.** Stop and follow the private reporting instructions in [SECURITY.md](https://github.com/2391572070/DevFreeze/security/policy). Remove credentials, private source, environment-variable values, and sensitive paths from all examples.
+  - type: input
+    id: version
+    attributes:
+      label: DevFreeze version
+      description: Run `devfreeze --version` and paste the result.
+      placeholder: devfreeze 0.1.0
+    validations:
+      required: true
+  - type: input
+    id: environment
+    attributes:
+      label: Operating system and Python version
+      description: Include the OS name/version and `python --version` output.
+      placeholder: Ubuntu 24.04, Python 3.12.4
+    validations:
+      required: true
+  - type: dropdown
+    id: command_area
+    attributes:
+      label: Affected command or area
+      options:
+        - freeze / list / show
+        - diff / thaw
+        - run / services / stop
+        - configuration or storage
+        - doctor or packaging
+        - documentation
+        - other
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Minimal reproduction
+      description: List exact, sanitized steps that reproduce the problem from a clean temporary project when possible.
+      placeholder: |
+        1. Create ...
+        2. Run ...
+        3. Observe ...
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior and sanitized output
+      description: Paste only the relevant output. Do not include secrets or private source code.
+    validations:
+      required: true
+  - type: textarea
+    id: additional_context
+    attributes:
+      label: Additional context
+      description: Include whether the behavior is platform-specific or intermittent.
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Submission checks
+      options:
+        - label: I searched existing issues and pull requests for duplicates.
+          required: true
+        - label: I removed credentials, private source, environment-variable values, and other sensitive metadata.
+          required: true
+        - label: This is not a suspected security vulnerability.
+          required: true
